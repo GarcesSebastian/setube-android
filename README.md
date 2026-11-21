@@ -80,3 +80,34 @@ flutter build apk --release --split-per-abi --target-platform android-arm64,andr
 Los APK quedan en `build/app/outputs/flutter-apk/` (`app-arm64-v8a-release.apk` para casi todos los teléfonos actuales). La firma de release sale de `android/key.properties` (fuera del repo). Sin ese archivo se firma con la clave de debug.
 
 `minSdk` es 29 (Android 10) para guardar en Música, Películas y Descargas sin pedir permisos de almacenamiento.
+
+## Estructura
+
+```
+lib/
+  core/       links, formatos y selección, MP4/DASH, salida de yt-dlp, errores y cifras (sin Flutter, con tests)
+  native/     canales con Kotlin
+  services/   YouTube (yt-dlp + oEmbed + cachés)
+  state/      cola, búsqueda, reproductor, registro y preferencias
+  ui/         pantallas y piezas con los tokens de la web
+android/app/src/main/kotlin/com/sebxstt/setube/
+  Engine.kt          yt-dlp (youtubedl-android), política de sesión y diagnóstico
+  YtdlpDir.kt        yt-dlp descomprimido (bytecode en caché) y su actualización
+  InfoBatcher.kt     cola única de info de yt-dlp: lotes de 8 videos, 3 procesos a la vez
+  FastDownload.kt    descarga directa en paralelo por tramos
+  Convert.kt         conversión con una llamada a ffmpeg
+  Helper.kt          servidor local para el plugin: PO tokens (BotGuard) y retos JS en WebViews
+  CookieStore.kt     cookies del WebView → cookies.txt
+  LoginActivity.kt   login de Google y renovación de la sesión
+  DownloadService.kt descargas en primer plano, progreso, ZIP, registro y notificaciones
+  Saver.kt / History.kt
+  Player.kt          ExoPlayer, fuente con tramos y renovación de URLs, MediaSession
+  PcSend.kt          envío al PC con LocalSend (descubrimiento, mTLS, subida)
+  PcService.kt       cola de envíos en primer plano
+  MainActivity.kt    canales, abrir, compartir y carpetas
+test/                pruebas unitarias (los fixtures son los mismos de la web y la API)
+```
+
+## Aviso legal
+
+Setube es para contenido propio o sobre el que tengas permiso. Descargar material protegido sin autorización puede infringir los derechos de autor y los términos de YouTube.
