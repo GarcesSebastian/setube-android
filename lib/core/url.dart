@@ -89,3 +89,53 @@ ParsedUrl? parseYouTubeUrl(String input) {
   }
   return null;
 }
+
+// Un link de YouTube dentro de cualquier texto (mensajes de WhatsApp con fecha y nombre, listas, párrafos).
+// El dominio no puede ir pegado a otras letras («notyoutube.com») y el link termina en el primer espacio.
+final _linkInText = RegExp(
+  r'''(?<![A-Za-z0-9.-])(?:https?://)?(?:[A-Za-z0-9-]+\.)*(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/[^\s<>"'`]+''',
+  caseSensitive: false,
+);
+// Puntuación que suele quedar pegada al final de un link en un mensaje
+final _trailing = RegExp(r'''[)\].,;:!?'"»”’>}]+$''');
+
+/// Todos los links de YouTube válidos de un texto, en orden y sin repetir. Lo demás se descarta.
+List<String> extractYouTubeLinks(String text) {
+  final out = <String>[];
+  final seen = <String>{};
+  for (final m in _linkInText.allMatches(text)) {
+    var u = m.group(0)!;
+    ParsedUrl? p = parseYouTubeUrl(u);
+    while (p == null && _trailing.hasMatch(u)) {
+      u = u.substring(0, u.length - 1);
+      p = parseYouTubeUrl(u);
+    }
+    if (p == null) continue;
+    final key = '${p.videoId}|${p.playlistId}';
+    if (seen.add(key)) out.add(u);
+  }
+  return out;
+}
+
+/// El texto no tiene nada aparte de links (uno por línea).
+bool onlyLinks(String text) =>
+    text.split(RegExp(r'\r?\n')).map((l) => l.trim()).where((l) => l.isNotEmpty).every((l) => parseYouTubeUrl(l) != null);
+
+// Algo con pinta de URL no se busca aunque no sea de YouTube: se marca como no válido
+final _urlLike = RegExp(r'^(https?://|www\.)|youtu\.?be|^[^\s]+\.[a-z]{2,}(/|$)', caseSensitive: false);
+
+/// Texto de búsqueda: una sola línea que no es un link. `null` si hay que tratarlo como links.
+String? searchQuery(String text) {
+  final lines = text.split(RegExp(r'\r?\n')).map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+  if (lines.length != 1) return null;
+  final line = lines.first;
+  if (parseYouTubeUrl(line) != null || _urlLike.hasMatch(line)) return null;
+  return line.replaceAll(RegExp(r'\s+'), ' ');
+}
+
+/// Quita caracteres de control y espacios repetidos; recorta a 100. `null` si queda vacía.
+String? normalizeQuery(String raw) {
+  final q = raw.replaceAll(RegExp(r'[\u0000-\u001f\u007f-\u009f]'), ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (q.isEmpty) return null;
+  return q.length > 100 ? q.substring(0, 100).trim() : q;
+}
