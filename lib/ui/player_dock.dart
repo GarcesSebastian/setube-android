@@ -194,3 +194,154 @@ class MiniPlayer extends StatelessWidget {
     ]);
   }
 }
+
+class VideoPanel extends StatelessWidget {
+  const VideoPanel({super.key, required this.player});
+  final PlayerModel player;
+
+  @override
+  Widget build(BuildContext context) {
+    final w = player.videoWidth, h = player.videoHeight;
+    final ratio = w > 0 && h > 0 ? w / h : 16 / 9;
+    final maxH = MediaQuery.sizeOf(context).height * 0.34;
+    return GestureDetector(
+      onDoubleTap: () => openFullscreen(context, player),
+      child: Container(
+        color: Colors.black,
+        height: maxH,
+        width: double.infinity,
+        child: Stack(children: [
+          Center(
+            child: AspectRatio(
+              aspectRatio: ratio,
+              child: player.textureId == null ? const SizedBox.shrink() : Texture(textureId: player.textureId!),
+            ),
+          ),
+          Positioned(
+            right: 4,
+            top: 4,
+            child: IconBtn(
+              icon: LucideIcons.maximize,
+              tooltip: 'Pantalla completa',
+              color: Colors.white,
+              size: 40,
+              onPressed: () => openFullscreen(context, player),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
+
+Future<void> openFullscreen(BuildContext context, PlayerModel player) async {
+  await SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  if (!context.mounted) return;
+  await Navigator.of(context).push(PageRouteBuilder<void>(
+    opaque: true,
+    pageBuilder: (_, _, _) => FullscreenVideo(player: player),
+    transitionsBuilder: (_, a, _, child) => FadeTransition(opacity: a, child: child),
+  ));
+  await SystemChrome.setPreferredOrientations(const []);
+  await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+}
+
+class FullscreenVideo extends StatefulWidget {
+  const FullscreenVideo({super.key, required this.player});
+  final PlayerModel player;
+
+  @override
+  State<FullscreenVideo> createState() => _FullscreenVideoState();
+}
+
+class _FullscreenVideoState extends State<FullscreenVideo> {
+  bool _controls = true;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: ListenableBuilder(
+        listenable: widget.player,
+        builder: (context, _) {
+          final pl = widget.player;
+          if (!pl.watching) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) Navigator.of(context).maybePop();
+            });
+          }
+          final w = pl.videoWidth, h = pl.videoHeight;
+          final dur = pl.durationMs;
+          final pos = pl.positionMs.clamp(0, dur > 0 ? dur : pl.positionMs);
+          return GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() => _controls = !_controls),
+            onDoubleTap: () => Navigator.of(context).maybePop(),
+            child: Stack(children: [
+              Center(
+                child: AspectRatio(
+                  aspectRatio: w > 0 && h > 0 ? w / h : 16 / 9,
+                  child: pl.textureId == null ? const SizedBox.shrink() : Texture(textureId: pl.textureId!),
+                ),
+              ),
+              if (_controls)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black.withValues(alpha: 0.35),
+                    child: SafeArea(
+                      child: Column(children: [
+                        Row(children: [
+                          IconBtn(icon: LucideIcons.minimize, tooltip: 'Salir de pantalla completa', color: Colors.white, onPressed: () => Navigator.of(context).maybePop()),
+                          Expanded(
+                            child: Text(pl.track?.title ?? '', maxLines: 1, overflow: TextOverflow.ellipsis,
+                                style: body(15, weight: FontWeight.w600, color: Colors.white)),
+                          ),
+                          IconBtn(
+                            icon: LucideIcons.headphones,
+                            tooltip: 'Solo audio',
+                            color: Colors.white,
+                            onPressed: () => pl.setMode('audio'),
+                          ),
+                        ]),
+                        const Spacer(),
+                        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                          IconBtn(icon: LucideIcons.rewind, tooltip: 'Atrás 10 s', color: Colors.white, onPressed: () => pl.skip(-10000)),
+                          const SizedBox(width: 24),
+                          IconBtn(
+                            icon: pl.isPlaying ? LucideIcons.pause : LucideIcons.play,
+                            tooltip: pl.isPlaying ? 'Pausar' : 'Reproducir',
+                            color: Colors.white,
+                            size: 56,
+                            onPressed: pl.playPause,
+                          ),
+                          const SizedBox(width: 24),
+                          IconBtn(icon: LucideIcons.fastForward, tooltip: 'Adelante 10 s', color: Colors.white, onPressed: () => pl.skip(10000)),
+                        ]),
+                        const Spacer(),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 16),
+                          child: Row(children: [
+                            Text(formatDuration(pos / 1000), style: mono(12, color: Colors.white)),
+                            Expanded(
+                              child: Slider(
+                                value: dur > 0 ? pos / dur : 0,
+                                activeColor: p.red,
+                                onChanged: dur > 0 ? (v) => pl.seek((v * dur).round()) : null,
+                              ),
+                            ),
+                            Text(formatDuration(dur / 1000), style: mono(12, color: Colors.white)),
+                          ]),
+                        ),
+                      ]),
+                    ),
+                  ),
+                ),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+}
