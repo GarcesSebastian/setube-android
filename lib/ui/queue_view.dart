@@ -201,3 +201,204 @@ class QueueRow extends StatefulWidget {
   @override
   State<QueueRow> createState() => _QueueRowState();
 }
+
+class _QueueRowState extends State<QueueRow> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    final i = widget.item;
+    final q = widget.queue;
+    final pl = widget.player;
+    final current = pl.track?.key == i.key;
+    final playing = current && pl.isPlaying;
+    final playable = pl.canPlay(i);
+    final watchable = pl.canWatch(i);
+    final m = i.meta;
+    final size = m == null ? null : estimateBytes(m, q.format, q.quality);
+    final st = meterState(i);
+    final showMeter = i.status != RowStatus.idle;
+    final phase = phaseLabel(i);
+    final speed = switch (i.status) {
+      RowStatus.downloading => formatSpeed(i.speed),
+      RowStatus.converting => i.conv > 0 ? '${i.conv.toStringAsFixed(i.conv < 10 ? 1 : 0).replaceAll('.', ',')}× tiempo real' : '',
+      _ => '',
+    };
+    final stats = i.status == RowStatus.done ? doneStats(i) : '';
+    final sub = [
+      i.author,
+      if (i.duration != null && i.duration! > 0) formatDuration(i.duration),
+      if (size != null) '~${formatBytes(size)}',
+    ].whereType<String>().join(' · ');
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          GestureDetector(
+            onTap: playable ? () => pl.toggle(i) : null,
+            child: VideoThumb(
+              url: i.thumbnail,
+              width: 96,
+              ring: current,
+              child: playable
+                  ? Center(
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.65), shape: BoxShape.circle),
+                        child: Icon(playing ? LucideIcons.pause : LucideIcons.play, size: 16, color: Colors.white),
+                      ),
+                    )
+                  : null,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              if (i.title == null && i.loadingMeta)
+                const Padding(padding: EdgeInsets.only(top: 2, bottom: 6), child: Skeleton(height: 14))
+              else
+                Text(i.title ?? 'Video de YouTube', maxLines: 2, overflow: TextOverflow.ellipsis,
+                    style: body(14.5, weight: FontWeight.w500, color: p.ink, height: 1.3)),
+              if (sub.isNotEmpty) Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis, style: body(12.5, color: p.inkMuted)),
+              if (i.origin != null)
+                Text('De la playlist ${i.origin}', maxLines: 1, overflow: TextOverflow.ellipsis, style: body(12, color: p.inkMuted)),
+            ]),
+          ),
+          IconBtn(icon: LucideIcons.x, tooltip: 'Quitar', size: 36, onPressed: () => q.remove(i.key)),
+        ]),
+        if (showMeter) ...[
+          const SizedBox(height: 8),
+          Meter(pct: i.pct, state: st),
+          const SizedBox(height: 4),
+          Row(children: [
+            Text(
+              st == MeterState.error ? '' : formatPct(i.pct, done: i.status == RowStatus.done),
+              style: mono(12.5, weight: FontWeight.w600, color: p.ink),
+            ),
+            const SizedBox(width: 8),
+            Expanded(child: Text(phase, style: body(12.5, color: i.status == RowStatus.error ? p.redInk : p.inkMuted))),
+            if (speed.isNotEmpty) Text(speed, style: mono(12, color: p.inkMuted)),
+          ]),
+          if (stats.isNotEmpty) Text(stats, style: mono(11.5, color: p.inkMuted)),
+        ],
+        if (i.status == RowStatus.error && i.error != null)
+          Padding(padding: const EdgeInsets.only(top: 4), child: Text(messageFor(i.error!), style: body(13, color: p.redInk))),
+        if (i.metaState == MetaState.error && i.metaError != null)
+          Padding(padding: const EdgeInsets.only(top: 6), child: Text(messageFor(i.metaError!), style: body(13, color: p.redInk))),
+        if (i.loadingMeta && i.title != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(i.metaError != null ? 'No se pudieron leer los detalles.' : 'Leyendo detalles…', style: body(12, color: p.inkMuted)),
+          ),
+        const SizedBox(height: 6),
+        Wrap(spacing: 6, runSpacing: 6, children: [
+          if (watchable)
+            Btn(
+              label: current && pl.mode == 'video' ? 'Viendo' : 'Ver video',
+              icon: LucideIcons.monitorPlay,
+              compact: true,
+              onPressed: () => current ? pl.setMode('video') : pl.playItem(i, video: true),
+            ),
+          if (i.status == RowStatus.done && i.entry != null && i.entry!.kind == 'file') ...[
+            Btn(label: 'Abrir', icon: LucideIcons.play, compact: true, onPressed: () => widget.history.open(i.entry!)),
+            Btn(label: 'Compartir', icon: LucideIcons.share2, compact: true, onPressed: () => widget.history.share(i.entry!)),
+            Btn(label: 'Al PC', icon: LucideIcons.monitor, compact: true, onPressed: () => sendToPc(context, widget.pc, i.entry!, widget.queue.settings)),
+          ] else if (i.status == RowStatus.done && i.entry != null)
+            ...[
+              Btn(label: 'Ver ZIP', icon: LucideIcons.fileArchive, compact: true, onPressed: () => widget.history.openFolder(i.entry!)),
+              Btn(label: 'Al PC', icon: LucideIcons.monitor, compact: true, onPressed: () => sendToPc(context, widget.pc, i.entry!, widget.queue.settings)),
+            ]
+          else if (i.status == RowStatus.error || i.status == RowStatus.canceled)
+            Btn(label: 'Reintentar', icon: LucideIcons.rotateCcw, compact: true, onPressed: q.busy ? null : () => q.retry(i))
+          else if (!i.active && i.convertible)
+            Btn(label: 'Descargar', icon: LucideIcons.download, compact: true, onPressed: q.busy ? null : () => q.convert(only: [i])),
+          if (i.metaState == MetaState.error || (i.metaError != null && !isDefinitive(i.metaError!)))
+            Btn(label: 'Reintentar detalles', icon: LucideIcons.refreshCw, compact: true, onPressed: () => q.retryMeta(i)),
+          if (i.listId != null)
+            Btn(label: 'Agregar la playlist', icon: LucideIcons.listPlus, compact: true, onPressed: () {
+              final id = i.listId!;
+              i.listId = null;
+              q.addPlaylist(id);
+            }),
+          Btn(
+            label: _open ? 'Ocultar ficha' : 'Ficha',
+            icon: LucideIcons.info,
+            kind: BtnKind.ghost,
+            compact: true,
+            onPressed: () => setState(() => _open = !_open),
+          ),
+        ]),
+        if (_open) _Ficha(item: i, queue: q),
+      ]),
+    );
+  }
+}
+
+class _Ficha extends StatelessWidget {
+  const _Ficha({required this.item, required this.queue});
+  final QueueItem item;
+  final QueueModel queue;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    final m = item.meta;
+    Widget row(String k, Widget v) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            SizedBox(width: 92, child: Text(k, style: body(13, color: p.inkMuted))),
+            Expanded(child: v),
+          ]),
+        );
+    String size(OutFormat f, int? q) {
+      final b = m == null ? null : estimateBytes(m, f, q);
+      return b == null ? '—' : formatBytes(b);
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Panel(
+        color: p.bg,
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          row('Canal', Text(item.author ?? '—', style: body(13.5, color: p.ink))),
+          row('Duración', Text(formatDuration(item.duration).isEmpty ? '—' : formatDuration(item.duration), style: mono(13, color: p.ink))),
+          if (item.origin != null) row('Playlist', Text(item.origin!, style: body(13.5, color: p.ink))),
+          if (m != null && m.video.isNotEmpty)
+            row('Resoluciones', Wrap(spacing: 4, runSpacing: 4, children: [for (final v in m.video) StatPill('${v.height}p')])),
+          if (m != null) ...[
+            row(
+              'Audio',
+              Text('MP3 ${size(OutFormat.mp3, 128)} / ${size(OutFormat.mp3, 192)} / ${size(OutFormat.mp3, 320)}\n'
+                  'M4A ${size(OutFormat.m4a, null)} · WAV ${size(OutFormat.wav, null)}',
+                  style: mono(12.5, color: p.ink)),
+            ),
+            if (m.video.isNotEmpty)
+              row(
+                'Video',
+                Text([for (final q in const [360, 480, 720, 1080]) if (m.video.any((v) => v.height >= q)) '${q}p ${size(OutFormat.mp4, q)}'].join('\n'),
+                    style: mono(12.5, color: p.ink)),
+              ),
+          ],
+          if (m?.description != null)
+            Padding(padding: const EdgeInsets.only(top: 6), child: Text(m!.description!, style: body(13, color: p.inkMuted))),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Btn(
+                label: 'Abrir en YouTube',
+                icon: LucideIcons.externalLink,
+                kind: BtnKind.ghost,
+                compact: true,
+                onPressed: () => AppNative.openUrl(item.url),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+}
