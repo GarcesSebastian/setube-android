@@ -297,3 +297,154 @@ int? estimateBytes(Meta meta, OutFormat format, int? quality) {
   if (s.transcode) return (192 * 1000 / 8 * d).round();
   return s.bytes;
 }
+
+// Reproducción
+
+/// Una fuente de googlevideo que el reproductor puede pedir directamente (la URL está atada a la IP del teléfono).
+class StreamSource {
+  StreamSource({
+    required this.formatId,
+    required this.url,
+    required this.headers,
+    required this.mime,
+    this.size,
+    this.codecs = '',
+    this.width,
+    this.height,
+    this.fps,
+    this.tbr,
+    this.abr,
+  });
+  final String formatId;
+  final String url;
+  final Map<String, String> headers;
+  final String mime;
+  final int? size;
+  final String codecs;
+  final int? width;
+  final int? height;
+  final num? fps;
+  final num? tbr;
+  final num? abr;
+
+  /// Calidad nominal: el lado corto, como YouTube (un Short 1080x1920 es 1080p).
+  int get quality => width == null ? (height ?? 0) : (width! < (height ?? 0) ? width! : (height ?? 0));
+
+  Json toJson() => {'formatId': formatId, 'url': url, 'headers': headers, 'mime': mime, 'size': size};
+}
+
+Uri? _googlevideo(Object? raw) {
+  if (raw is! String) return null;
+  final u = Uri.tryParse(raw);
+  return u != null && u.scheme == 'https' && u.host.endsWith('.googlevideo.com') ? u : null;
+}
+
+Map<String, String> streamHeaders(Object? raw) {
+  final out = <String, String>{};
+  if (raw is Map) {
+    raw.forEach((k, v) {
+      final lk = '$k'.toLowerCase();
+      if (lk == 'cookie' || lk == 'accept-encoding' || lk == 'range' || v is! String) return;
+      out['$k'] = v;
+    });
+  }
+  return out;
+}
+
+int? _posInt(Object? v) {
+  final n = v is String && RegExp(r'^\d+$').hasMatch(v) ? int.tryParse(v) : v;
+  return n is num && n > 0 && n.isFinite ? n.round() : null;
+}
+
+StreamSource _source(Json f, Uri u, String mime) => StreamSource(
+      formatId: _str(f['format_id']),
+      url: f['url'] as String,
+      headers: streamHeaders(f['http_headers']),
+      mime: mime,
+      size: _posInt(f['filesize']) ?? _posInt(f['clen']) ?? _posInt(u.queryParameters['clen']),
+      codecs: mime.startsWith('video') ? _str(f['vcodec']) : _str(f['acodec']),
+      width: _posInt(f['width']),
+      height: _posInt(f['height']),
+      fps: _num(f['fps']),
+      tbr: _num(f['tbr']),
+      abr: _num(f['abr']) ?? _num(f['tbr']),
+    );
+
+final _drc = RegExp(r'(^|-)drc(-|$)');
+
+/// Audio para escuchar: AAC primero (o Opus con `opus: true`), sin DRC, idioma original y mejor calidad.
+List<StreamSource> rankAudioSources(Json info, {bool opus = false}) {
+  final cands = <({Json f, Uri u, bool aac})>[];
+  for (final f in _formatsOf(info)) {
+    if (_str(f['vcodec']) != 'none' || _str(f['acodec']).isEmpty || _str(f['acodec']) == 'none') continue;
+    if (_str(f['protocol']) != 'https' || f['has_drm'] == true || _str(f['format_id']).isEmpty || !_isStereo(f)) continue;
+    final u = _googlevideo(f['url']);
+    if (u == null) continue;
+    final ac = _str(f['acodec']);
+    final ext = _str(f['ext']);
+    if (ext == 'm4a' && ac.startsWith('mp4a')) {
+      cands.add((f: f, u: u, aac: true));
+    } else if (ext == 'webm' && ac.startsWith('opus')) {
+      cands.add((f: f, u: u, aac: false));
+    }
+  }
+  num n(Object? v) => v is num && v.isFinite ? v : double.negativeInfinity;
+  int lc(String s) => s.startsWith('mp4a.40.2') ? 0 : (s.startsWith('mp4a.40.5') ? 1 : 2);
+  int cmp(num a, num b) => a == b ? 0 : (a < b ? -1 : 1);
+  cands.sort((a, b) {
+    final ida = _str(a.f['format_id']);
+    final idb = _str(b.f['format_id']);
+    int first(({Json f, Uri u, bool aac}) x) => x.aac != opus ? 0 : 1;
+    var r = cmp(first(a), first(b));
+    if (r != 0) return r;
+    r = cmp(_drc.hasMatch(ida) ? 1 : 0, _drc.hasMatch(idb) ? 1 : 0);
+    if (r != 0) return r;
+    r = cmp(n(b.f['language_preference']), n(a.f['language_preference']));
+    if (r != 0) return r;
+    r = cmp(lc(_str(a.f['acodec'])), lc(_str(b.f['acodec'])));
+    if (r != 0) return r;
+    r = cmp(n(b.f['quality']), n(a.f['quality']));
+    if (r != 0) return r;
+    r = cmp(n(b.f['abr']), n(a.f['abr']));
+    if (r != 0) return r;
+    return ida.compareTo(idb);
+  });
+  return [for (final c in cands) _source(c.f, c.u, c.aac ? 'audio/mp4' : 'audio/webm')];
+}
+
+/// Variantes de video para ver en la app: avc1 en mp4 sin audio, https, sin DRM; la de mayor tbr por calidad.
+List<StreamSource> videoRenditions(Json info, {int maxHeight = 1080}) {
+  final byQ = <int, StreamSource>{};
+  for (final f in _formatsOf(info)) {
+    if (!_str(f['vcodec']).startsWith('avc1') || _str(f['acodec']) != 'none' || _str(f['ext']) != 'mp4') continue;
+    if (_str(f['protocol']) != 'https' || f['has_drm'] == true || _str(f['format_id']).isEmpty) continue;
+    if (_posInt(f['height']) == null) continue;
+    final u = _googlevideo(f['url']);
+    if (u == null) continue;
+    final r = _source(f, u, 'video/mp4');
+    if (r.quality > maxHeight) continue;
+    final prev = byQ[r.quality];
+    if (prev == null || _better(r, prev)) byQ[r.quality] = r;
+  }
+  final list = byQ.values.toList()..sort((a, b) => a.quality.compareTo(b.quality));
+  return list;
+}
+
+bool _better(StreamSource a, StreamSource b) {
+  final ta = a.tbr ?? -1, tb = b.tbr ?? -1;
+  if (ta != tb) return ta > tb;
+  final fa = a.fps ?? -1, fb = b.fps ?? -1;
+  if (fa != fb) return fa > fb;
+  return a.formatId.compareTo(b.formatId) < 0;
+}
+
+/// Segundos que le quedan a las URLs firmadas de la info (`expire=`). `null` si no se sabe.
+int? infoExpiresAt(Json info) {
+  for (final f in _formatsOf(info)) {
+    final u = Uri.tryParse(_str(f['url']));
+    if (u == null) continue;
+    final e = u.queryParameters['expire'] ?? RegExp(r'/expire/(\d+)').firstMatch(u.path)?.group(1);
+    if (e != null && RegExp(r'^\d+$').hasMatch(e)) return int.parse(e);
+  }
+  return null;
+}
