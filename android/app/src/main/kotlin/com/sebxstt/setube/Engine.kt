@@ -388,3 +388,25 @@ object Engine {
         "error ${e.javaClass.simpleName}: ${e.message}"
     }
 }
+
+object Errors {
+    private val RULES = listOf(
+        Regex("Sign in to confirm you.?re not a bot|confirm you are not a robot|LOGIN_REQUIRED", RegexOption.IGNORE_CASE) to "upstreamBlocked",
+        Regex("Private video", RegexOption.IGNORE_CASE) to "privateVideo",
+        Regex("confirm your age|age-restricted|inappropriate for some users", RegexOption.IGNORE_CASE) to "ageRestricted",
+        Regex("live event will begin|is live|Premieres in|This live stream recording is not available", RegexOption.IGNORE_CASE) to "liveNotSupported",
+        Regex("Video unavailable|has been removed|account .* terminated|not (made this video )?available in your country", RegexOption.IGNORE_CASE) to "videoUnavailable",
+        Regex("Requested format is not available", RegexOption.IGNORE_CASE) to "formatUnavailable",
+        Regex("HTTP Error 403|HTTP Error 410|The info failed to download", RegexOption.IGNORE_CASE) to "upstreamForbidden",
+        Regex("No space left|Permission denied", RegexOption.IGNORE_CASE) to "storage",
+        Regex("timed out|Connection reset|HTTP Error 5\\d\\d|Unable to download|Network is unreachable|Failed to resolve", RegexOption.IGNORE_CASE) to "upstreamError",
+    )
+
+    fun classify(err: String, canceled: Boolean = false): String {
+        if (canceled) return "canceled"
+        for ((re, code) in RULES) if (re.containsMatchIn(err)) return code
+        return "upstreamError"
+    }
+
+    val DEFINITIVE = setOf("privateVideo", "ageRestricted", "liveNotSupported", "videoUnavailable")
+}
