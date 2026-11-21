@@ -279,3 +279,233 @@ object JsRunner {
         }
     }
 }
+
+/**
+ * PO tokens de BotGuard con un WebView, como NewPipe (PoTokenWebView): se pide el reto a
+ * youtube.com/api/jnn/v1/Create, se ejecuta BotGuard, se canjea en GenerateIT por un integrity token y con él
+ * se generan los tokens para cada identificador (video ID, visitor data o data sync ID).
+ */
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+object PotMinter {
+    private const val TAG = "SetubePot"
+    private const val API_KEY = "AIzaSyDyT5W0Jh49F30Pqqtyfdf7pDLFKLJoAnw"
+    private const val REQUEST_KEY = "O43z0dpjhgX20SCx4KAo"
+    private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+    private const val JS = "SetubePot"
+    private val main = Handler(Looper.getMainLooper())
+    private val io = Executors.newSingleThreadExecutor()
+    private val lock = Any()
+
+    private var web: WebView? = null
+    private var expiresAt = 0L
+    private var initLatch: CountDownLatch? = null
+    @Volatile private var initError: String? = null
+    private val pending = ConcurrentHashMap<String, Pair<CountDownLatch, Array<String?>>>()
+    private val cache = ConcurrentHashMap<String, Pair<String, Long>>()
+
+    fun mint(identifier: String): String? {
+        if (identifier.isEmpty()) return null
+        cache[identifier]?.let { (t, exp) -> if (System.currentTimeMillis() < exp) return t }
+        for (attempt in 0..1) {
+            if (!ensureReady(force = attempt > 0)) continue
+            val t = obtain(identifier)
+            if (t != null) {
+                cache[identifier] = t to minOf(expiresAt, System.currentTimeMillis() + 6 * 3600_000L)
+                return t
+            }
+        }
+        return null
+    }
+
+    private fun ensureReady(force: Boolean): Boolean {
+        val latch: CountDownLatch
+        synchronized(lock) {
+            val ok = web != null && System.currentTimeMillis() < expiresAt && initLatch?.count == 0L && initError == null
+            if (ok && !force) return true
+            if (initLatch == null || initLatch!!.count == 0L || force) {
+                initLatch = CountDownLatch(1)
+                initError = null
+                val l = initLatch!!
+                main.post { create(l) }
+            }
+            latch = initLatch!!
+        }
+        if (!latch.await(30, TimeUnit.SECONDS)) {
+            initError = "timeout"
+            return false
+        }
+        return initError == null
+    }
+
+    private fun fail(l: CountDownLatch, msg: String) {
+        Log.w(TAG, "botguard: $msg")
+        initError = msg
+        l.countDown()
+    }
+
+    private fun create(l: CountDownLatch) {
+        try {
+            web?.destroy()
+            val w = WebView(Helper.app)
+            web = w
+            w.settings.javaScriptEnabled = true
+            w.settings.userAgentString = UA
+            w.settings.blockNetworkLoads = true
+            if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) WebSettingsCompat.setSafeBrowsingEnabled(w.settings, false)
+            w.addJavascriptInterface(Bridge(l), JS)
+            w.webChromeClient = object : WebChromeClient() {
+                override fun onConsoleMessage(m: ConsoleMessage): Boolean {
+                    if (m.message().contains("Uncaught")) fail(l, "uncaught: ${m.message()}")
+                    return true
+                }
+            }
+            val html = Helper.app.assets.open("po_token.html").bufferedReader().use { it.readText() }
+            w.loadDataWithBaseURL(
+                "https://www.youtube.com",
+                html.replaceFirst("</script>", "\n$JS.downloadAndRunBotguard()</script>"),
+                "text/html", "utf-8", null,
+            )
+        } catch (e: Throwable) {
+            fail(l, "webview: ${e.message}")
+        }
+    }
+
+    private fun post(url: String, body: String): String {
+        val c = URL(url).openConnection() as HttpURLConnection
+        c.requestMethod = "POST"
+        c.connectTimeout = 10_000
+        c.readTimeout = 15_000
+        c.doOutput = true
+        c.setRequestProperty("User-Agent", UA)
+        c.setRequestProperty("Accept", "application/json")
+        c.setRequestProperty("Content-Type", "application/json+protobuf")
+        c.setRequestProperty("x-goog-api-key", API_KEY)
+        c.setRequestProperty("x-user-agent", "grpc-web-javascript/0.1")
+        c.outputStream.use { it.write(body.toByteArray()) }
+        if (c.responseCode != 200) throw IllegalStateException("HTTP ${c.responseCode}")
+        return c.inputStream.bufferedReader().use { it.readText() }
+    }
+
+    /** Métodos que llama el JavaScript de po_token.html. */
+    private class Bridge(private val l: CountDownLatch) {
+        @JavascriptInterface
+        fun downloadAndRunBotguard() {
+            io.execute {
+                try {
+                    val data = parseChallenge(post("https://www.youtube.com/api/jnn/v1/Create", "[ \"$REQUEST_KEY\" ]"))
+                    main.post {
+                        web?.evaluateJavascript(
+                            """try {
+                                data = $data
+                                runBotGuard(data).then(function (result) {
+                                    this.webPoSignalOutput = result.webPoSignalOutput
+                                    $JS.onRunBotguardResult(result.botguardResponse)
+                                }, function (error) { $JS.onJsInitializationError(error + "\n" + error.stack) })
+                            } catch (error) { $JS.onJsInitializationError(error + "\n" + error.stack) }""",
+                            null,
+                        )
+                    }
+                } catch (e: Throwable) {
+                    fail(l, "create: ${e.message}")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onJsInitializationError(error: String) = fail(l, "js: ${error.take(300)}")
+
+        @JavascriptInterface
+        fun onRunBotguardResult(botguardResponse: String) {
+            io.execute {
+                try {
+                    val arr = JSONArray(post("https://www.youtube.com/api/jnn/v1/GenerateIT", "[ \"$REQUEST_KEY\", \"$botguardResponse\" ]"))
+                    val token = u8(b64(arr.getString(0)))
+                    val ttl = arr.optLong(1, 3600)
+                    main.post {
+                        web?.evaluateJavascript("this.integrityToken = $token") {
+                            // 10 minutos de margen
+                            expiresAt = System.currentTimeMillis() + (ttl - 600).coerceAtLeast(60) * 1000
+                            l.countDown()
+                        }
+                    }
+                } catch (e: Throwable) {
+                    fail(l, "generateIT: ${e.message}")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun onObtainPoTokenResult(identifier: String, u8: String) {
+            val p = pending[identifier] ?: return
+            p.second[0] = try {
+                val bytes = u8.split(",").map { it.trim().toInt().toByte() }.toByteArray()
+                Base64.encodeToString(bytes, Base64.NO_WRAP).replace('+', '-').replace('/', '_')
+            } catch (_: Throwable) {
+                null
+            }
+            p.first.countDown()
+        }
+
+        @JavascriptInterface
+        fun onObtainPoTokenError(identifier: String, error: String) {
+            Log.w(TAG, "obtain: ${error.take(300)}")
+            pending[identifier]?.first?.countDown()
+        }
+    }
+
+    private fun obtain(identifier: String): String? {
+        val latch = CountDownLatch(1)
+        val slot = arrayOfNulls<String>(1)
+        pending[identifier] = latch to slot
+        val idJs = JSONObject.quote(identifier)
+        val u8 = u8(identifier.toByteArray())
+        main.post {
+            web?.evaluateJavascript(
+                """try {
+                    var identifier = $idJs
+                    var poTokenU8 = obtainPoToken(webPoSignalOutput, integrityToken, $u8)
+                    var s = ""
+                    for (var i = 0; i < poTokenU8.length; i++) { if (i != 0) s += ","; s += poTokenU8[i] }
+                    $JS.onObtainPoTokenResult(identifier, s)
+                } catch (error) { $JS.onObtainPoTokenError($idJs, error + "\n" + error.stack) }""",
+                null,
+            ) ?: latch.countDown()
+        }
+        latch.await(15, TimeUnit.SECONDS)
+        pending.remove(identifier)
+        return slot[0]
+    }
+
+    // Formatos de la API de BotGuard (JavaScriptUtil.kt de NewPipe)
+
+    private fun b64(s: String): ByteArray = Base64.decode(s.replace('-', '+').replace('_', '/').replace('.', '='), Base64.DEFAULT)
+
+    private fun u8(bytes: ByteArray) = "new Uint8Array([" + bytes.joinToString(",") { (it.toInt() and 0xff).toString() } + "])"
+
+    private fun parseChallenge(raw: String): String {
+        val scrambled = JSONArray(raw)
+        val cd = if (scrambled.length() > 1 && scrambled.opt(1) is String) {
+            JSONArray(String(b64(scrambled.getString(1)).map { (it + 97).toByte() }.toByteArray()))
+        } else {
+            scrambled.getJSONArray(0)
+        }
+        fun firstString(a: JSONArray?): Any {
+            if (a == null) return JSONObject.NULL
+            for (i in 0 until a.length()) if (a.opt(i) is String) return a.getString(i)
+            return JSONObject.NULL
+        }
+        return JSONObject()
+            .put("messageId", cd.optString(0))
+            .put(
+                "interpreterJavascript",
+                JSONObject()
+                    .put("privateDoNotAccessOrElseSafeScriptWrappedValue", firstString(cd.optJSONArray(1)))
+                    .put("privateDoNotAccessOrElseTrustedResourceUrlWrappedValue", firstString(cd.optJSONArray(2))),
+            )
+            .put("interpreterHash", cd.optString(3))
+            .put("program", cd.optString(4))
+            .put("globalName", cd.optString(5))
+            .put("clientExperimentsStateBlob", cd.optString(7))
+            .toString()
+    }
+}
