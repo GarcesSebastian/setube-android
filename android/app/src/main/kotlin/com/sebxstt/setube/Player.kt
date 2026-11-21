@@ -395,3 +395,85 @@ object PlayerHub {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 }
+
+/** El reproductor visto desde la pantalla de bloqueo: anterior y siguiente los decide la cola de Dart. */
+@OptIn(UnstableApi::class)
+class SessionPlayer(p: Player) : ForwardingPlayer(p) {
+    private var prev = false
+    private var next = false
+    private val wrappers = LinkedHashMap<Player.Listener, Player.Listener>()
+
+    fun setNeighbors(prev: Boolean, next: Boolean) {
+        if (this.prev == prev && this.next == next) return
+        this.prev = prev
+        this.next = next
+        val cmds = availableCommands
+        for (l in wrappers.keys.toList()) l.onAvailableCommandsChanged(cmds)
+    }
+
+    // Los cambios de comandos del reproductor de abajo se reenvían con anterior/siguiente añadidos
+    override fun addListener(listener: Player.Listener) {
+        val w = object : Player.Listener by listener {
+            override fun onAvailableCommandsChanged(availableCommands: Player.Commands) =
+                listener.onAvailableCommandsChanged(this@SessionPlayer.availableCommands)
+        }
+        wrappers[listener] = w
+        super.addListener(w)
+    }
+
+    override fun removeListener(listener: Player.Listener) {
+        val w = wrappers.remove(listener) ?: listener
+        super.removeListener(w)
+    }
+
+    override fun getAvailableCommands(): Player.Commands {
+        val b = super.getAvailableCommands().buildUpon()
+        if (prev) b.addAll(Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM)
+        if (next) b.addAll(Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM)
+        return b.build()
+    }
+
+    override fun isCommandAvailable(command: Int): Boolean = when (command) {
+        Player.COMMAND_SEEK_TO_PREVIOUS, Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> prev || super.isCommandAvailable(command)
+        Player.COMMAND_SEEK_TO_NEXT, Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> next
+        else -> super.isCommandAvailable(command)
+    }
+
+    override fun seekToNext() {
+        if (next) PlayerHub.command("next")
+    }
+
+    override fun seekToNextMediaItem() = seekToNext()
+
+    override fun seekToPrevious() {
+        // Como los reproductores: si ya avanzó unos segundos vuelve al inicio
+        if (currentPosition > 3000 || !prev) seekTo(0) else PlayerHub.command("prev")
+    }
+
+    override fun seekToPreviousMediaItem() = seekToPrevious()
+}
+
+@OptIn(UnstableApi::class)
+class PlaybackService : MediaSessionService() {
+    private var session: MediaSession? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        PlayerHub.player(this)
+        val sp = PlayerHub.session ?: return
+        session = MediaSession.Builder(this, sp).setSessionActivity(PlayerHub.sessionActivity(this)).build()
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = session
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val p = session?.player
+        if (p == null || !p.playWhenReady || p.mediaItemCount == 0) stopSelf()
+    }
+
+    override fun onDestroy() {
+        session?.release()
+        session = null
+        super.onDestroy()
+    }
+}
