@@ -172,3 +172,110 @@ object Helper {
         }
     }
 }
+
+/**
+ * Retos JS de YouTube (scripts EJS de yt-dlp) en un WebView: V8 con JIT, mucho más rápido que QuickJS.
+ * El script entra y el resultado sale por una interfaz JavaScript (sin red); cada reto corre dentro de una función
+ * con su propio console.log, así empieza limpio.
+ */
+@SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
+object JsRunner {
+    private const val TAG = "SetubeJs"
+    private const val JS = "SetubeJs"
+    private val main = Handler(Looper.getMainLooper())
+    private var web: WebView? = null
+    private val jobs = ConcurrentHashMap<String, Job>()
+
+    private class Job(val source: String) {
+        val done = CountDownLatch(1)
+        @Volatile var out: String? = null
+        @Volatile var error: String? = null
+    }
+
+    private class Bridge {
+        @JavascriptInterface
+        fun source(id: String): String = jobs[id]?.source ?: ""
+
+        @JavascriptInterface
+        fun done(id: String, out: String, error: Boolean) {
+            val j = jobs[id] ?: return
+            if (error) j.error = out else j.out = out
+            j.done.countDown()
+        }
+    }
+
+    private fun snippet(id: String) = """(function () {
+        if (typeof $JS === 'undefined') return 'nobridge';
+        var id = '$id';
+        try {
+            var src = $JS.source(id);
+            var out = [];
+            var c = { log: function () { out.push(Array.prototype.join.call(arguments, ' ')) }, error: function () {}, warn: function () {}, info: function () {}, debug: function () {} };
+            new Function('console', src)(c);
+            $JS.done(id, out.join('\n'), false);
+        } catch (e) {
+            $JS.done(id, String(e && e.stack || e), true);
+        }
+        return 'ok';
+    })()"""
+
+    /** Crea el WebView (una vez). Hay que llamarlo en el hilo principal. */
+    private fun webView(): WebView {
+        web?.let { return it }
+        val w = WebView(Helper.app)
+        w.settings.javaScriptEnabled = true
+        w.settings.blockNetworkLoads = true
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) WebSettingsCompat.setSafeBrowsingEnabled(w.settings, false)
+        w.addJavascriptInterface(Bridge(), JS)
+        w.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(m: ConsoleMessage): Boolean = true
+        }
+        w.loadDataWithBaseURL("https://www.youtube.com", "<!DOCTYPE html><html><head></head><body></body></html>", "text/html", "utf-8", null)
+        web = w
+        return w
+    }
+
+    fun run(script: String): String? {
+        val id = java.util.UUID.randomUUID().toString()
+        val job = Job(script)
+        jobs[id] = job
+        try {
+            // El WebView recién creado tarda un momento en tener la página y la interfaz: se reintenta
+            val deadline = System.currentTimeMillis() + 15_000
+            var started = false
+            while (!started && System.currentTimeMillis() < deadline) {
+                val ack = CountDownLatch(1)
+                var reply: String? = null
+                main.post {
+                    try {
+                        webView().evaluateJavascript(snippet(id)) { v ->
+                            reply = v
+                            ack.countDown()
+                        }
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "webview", e)
+                        ack.countDown()
+                    }
+                }
+                if (!ack.await(45, TimeUnit.SECONDS)) break
+                started = reply?.contains("ok") == true
+                if (!started) Thread.sleep(150)
+            }
+            if (!started || !job.done.await(30, TimeUnit.SECONDS)) {
+                Log.w(TAG, "js timeout")
+                main.post {
+                    web?.destroy()
+                    web = null
+                }
+                return null
+            }
+            if (job.error != null) {
+                Log.w(TAG, "js error: ${job.error?.take(500)}")
+                return null
+            }
+            return job.out
+        } finally {
+            jobs.remove(id)
+        }
+    }
+}
