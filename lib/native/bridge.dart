@@ -95,3 +95,104 @@ class SessionStatus {
     );
   }
 }
+
+class Session {
+  static Future<SessionStatus> status() async => SessionStatus.fromMap(await _session.invokeMethod('status'));
+  static Future<SessionStatus> login() async => SessionStatus.fromMap(await _session.invokeMethod('login'));
+  static Future<SessionStatus> logout() async => SessionStatus.fromMap(await _session.invokeMethod('logout'));
+
+  /// Abre YouTube unos segundos en un WebView sin interfaz para que rote las cookies de la sesión.
+  static Future<SessionStatus> refresh({bool force = false}) async =>
+      SessionStatus.fromMap(await _session.invokeMethod('refresh', {'force': force}));
+  static Future<SessionStatus> setMode(String mode) async =>
+      SessionStatus.fromMap(await _session.invokeMethod('setMode', {'mode': mode}));
+  static Future<SessionStatus> importCookies(String text) async =>
+      SessionStatus.fromMap(await _session.invokeMethod('importCookies', {'text': text}));
+}
+
+class Downloads {
+  static Stream<Map<String, dynamic>>? _events;
+
+  static Stream<Map<String, dynamic>> events() =>
+      _events ??= _downloadEvents.receiveBroadcastStream().map(_map).asBroadcastStream();
+
+  static Future<void> enqueue(Map<String, dynamic> job) => _downloads.invokeMethod('enqueue', {'job': job});
+  static Future<void> cancelJob(String jobId) => _downloads.invokeMethod('cancelJob', {'jobId': jobId});
+  static Future<void> cancelItem(String jobId, String itemId) =>
+      _downloads.invokeMethod('cancelItem', {'jobId': jobId, 'itemId': itemId});
+  static Future<List<Map<String, dynamic>>> active() async =>
+      [for (final e in (await _downloads.invokeMethod('active') as List? ?? const [])) _map(e)];
+
+  static Future<List<Map<String, dynamic>>> history() async =>
+      [for (final e in (await _downloads.invokeMethod('history') as List? ?? const [])) _map(e)];
+  static Future<void> deleteHistory(String id, {required bool deleteFile}) =>
+      _downloads.invokeMethod('deleteHistory', {'id': id, 'deleteFile': deleteFile});
+  static Future<void> clearHistory() => _downloads.invokeMethod('clearHistory');
+  static Future<List<bool>> exists(List<String> uris) async =>
+      [for (final e in (await _downloads.invokeMethod('exists', {'uris': uris}) as List? ?? const [])) e == true];
+
+  static Future<bool> open(String uri, String mime) async =>
+      await _downloads.invokeMethod('open', {'uri': uri, 'mime': mime}) == true;
+  static Future<bool> share(List<String> uris, String mime, {String? text}) async =>
+      await _downloads.invokeMethod('share', {'uris': uris, 'mime': mime, 'text': text}) == true;
+  static Future<bool> openFolder(String relativePath) async =>
+      await _downloads.invokeMethod('openFolder', {'relativePath': relativePath}) == true;
+}
+
+class NativePlayer {
+  static Stream<Map<String, dynamic>>? _events;
+
+  static Stream<Map<String, dynamic>> events() =>
+      _events ??= _playerEvents.receiveBroadcastStream().map(_map).asBroadcastStream();
+
+  static Future<void> load(Map<String, dynamic> track) => _player.invokeMethod('load', track);
+  static Future<void> play() => _player.invokeMethod('play');
+  static Future<void> pause() => _player.invokeMethod('pause');
+  static Future<void> seek(int ms) => _player.invokeMethod('seek', {'ms': ms});
+  static Future<void> stop() => _player.invokeMethod('stop');
+  static Future<void> setVolume(double v) => _player.invokeMethod('setVolume', {'volume': v});
+  static Future<void> setNeighbors({required bool prev, required bool next}) =>
+      _player.invokeMethod('setNeighbors', {'prev': prev, 'next': next});
+
+  /// Crea la textura donde se pinta el video y devuelve su id para `Texture`.
+  static Future<int> attachVideo() async => (await _player.invokeMethod('attachVideo') as num).toInt();
+  static Future<void> detachVideo() => _player.invokeMethod('detachVideo');
+}
+
+/// Envío al PC con LocalSend.
+class PcNative {
+  static Stream<Map<String, dynamic>>? _events;
+
+  static Stream<Map<String, dynamic>> events() =>
+      _events ??= _pcEvents.receiveBroadcastStream().map(_map).asBroadcastStream();
+
+  static Future<Map<String, dynamic>> state() async => _map(await _pc.invokeMethod('state'));
+  static Future<List<Map<String, dynamic>>> discover() async =>
+      [for (final e in (await _pc.invokeMethod('discover') as List? ?? const [])) _map(e)];
+  static Future<Map<String, dynamic>> choose(Map<String, dynamic> device) async => _map(await _pc.invokeMethod('choose', device));
+  static Future<Map<String, dynamic>> forget() async => _map(await _pc.invokeMethod('forget'));
+  static Future<Map<String, dynamic>> setAuto(bool on) async => _map(await _pc.invokeMethod('setAuto', {'on': on}));
+  static Future<void> send(String entryJson) => _pc.invokeMethod('send', {'entry': entryJson});
+  static Future<void> cancel() => _pc.invokeMethod('cancel');
+  static Future<void> installLink() => _pc.invokeMethod('installLink');
+}
+
+class AppNative {
+  static Future<bool> requestNotifications() async => await _app.invokeMethod('requestNotifications') == true;
+  static Future<void> keepScreenOn(bool on) => _app.invokeMethod('keepScreenOn', {'on': on});
+  static Future<bool> openUrl(String url) async => await _app.invokeMethod('openUrl', {'url': url}) == true;
+
+  /// Ruta (`history`) y texto compartido con los que se abrió la app.
+  static Future<({String? route, String? shared})> initial() async {
+    final m = _map(await _app.invokeMethod('initial'));
+    return (route: m['route'] as String?, shared: m['shared'] as String?);
+  }
+
+  /// Avisos de la parte nativa con la app abierta: `route` (tocar una notificación) y `shared` (texto compartido).
+  static void onCall(void Function(String method, String? arg) handler) {
+    _app.setMethodCallHandler((call) async {
+      handler(call.method, call.arguments as String?);
+      return null;
+    });
+  }
+}
