@@ -177,3 +177,221 @@ class SetubeDataSource(private val http: HttpDataSource.Factory) : BaseDataSourc
         const val CHUNK = 10L * 1024 * 1024
     }
 }
+
+/** Reproductor único de la app (ExoPlayer) con sesión multimedia para la pantalla de bloqueo. */
+@OptIn(UnstableApi::class)
+object PlayerHub {
+    private const val TAG = "SetubePlayer"
+    private val main = Handler(Looper.getMainLooper())
+    private var exo: ExoPlayer? = null
+    var session: SessionPlayer? = null
+        private set
+    private var controller: MediaController? = null
+    private var connecting = false
+    var sink: EventChannel.EventSink? = null
+    private var textures: TextureRegistry? = null
+    private var producer: TextureRegistry.SurfaceProducer? = null
+    private var key: String? = null
+    private var mode = "audio"
+    private var ticking = false
+    lateinit var app: Context
+
+    fun player(ctx: Context): ExoPlayer {
+        exo?.let { return it }
+        app = ctx.applicationContext
+        val p = ExoPlayer.Builder(app)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(factory()))
+            .setAudioAttributes(AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true)
+            .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(C.WAKE_MODE_NETWORK)
+            .build()
+        p.addListener(object : Player.Listener {
+            override fun onEvents(player: Player, events: Player.Events) = emitState()
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) tick()
+            }
+            override fun onPlayerError(error: PlaybackException) {
+                Log.w(TAG, "player error", error)
+                sink?.success(mapOf("type" to "error", "key" to key, "mode" to mode, "code" to error.errorCodeName, "message" to error.message))
+            }
+            override fun onVideoSizeChanged(videoSize: VideoSize) {
+                val pr = producer
+                if (pr != null && videoSize.width > 0 && videoSize.height > 0 && (pr.width != videoSize.width || pr.height != videoSize.height)) {
+                    pr.setSize(videoSize.width, videoSize.height)
+                    exo?.setVideoSurface(pr.surface)
+                }
+                emitState()
+            }
+        })
+        exo = p
+        session = SessionPlayer(p)
+        return p
+    }
+
+    private fun factory(): DataSource.Factory {
+        val http = DefaultHttpDataSource.Factory()
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(10_000)
+            .setReadTimeoutMs(20_000)
+            .setUserAgent(null)
+        return DataSource.Factory { SetubeDataSource(http) }
+    }
+
+    private fun connectSession() {
+        if (controller != null || connecting) return
+        connecting = true
+        val token = SessionToken(app, ComponentName(app, PlaybackService::class.java))
+        val f = MediaController.Builder(app, token)
+            .setListener(object : MediaController.Listener {
+                override fun onDisconnected(c: MediaController) {
+                    if (controller === c) controller = null
+                }
+            })
+            .buildAsync()
+        f.addListener({
+            connecting = false
+            try {
+                controller = f.get()
+            } catch (e: Exception) {
+                Log.w(TAG, "media session", e)
+            }
+        }, { main.post(it) })
+    }
+
+    fun load(ctx: Context, a: Map<*, *>) {
+        val p = player(ctx)
+        connectSession()
+        val videoId = a["videoId"] as String
+        key = a["key"] as? String
+        mode = a["mode"] as? String ?: "audio"
+        (a["sources"] as? List<*>)?.forEach { s ->
+            val m = s as? Map<*, *> ?: return@forEach
+            @Suppress("UNCHECKED_CAST")
+            val h = (m["headers"] as? Map<String, String>) ?: emptyMap()
+            Sources.put(videoId, m["formatId"] as String, Sources.Src(m["url"] as String, h, (m["size"] as? Number)?.toLong()))
+        }
+        val meta = MediaMetadata.Builder()
+            .setTitle(a["title"] as? String ?: "Video de YouTube")
+            .setArtist(a["author"] as? String)
+            .setArtworkUri((a["artwork"] as? String)?.let { Uri.parse(it) })
+            .build()
+        val item = MediaItem.Builder()
+            .setMediaId(key ?: videoId)
+            .setUri("setube://media/$videoId/${a["audioFormat"]}")
+            .setMediaMetadata(meta)
+            .build()
+        val pos = (a["positionMs"] as? Number)?.toLong() ?: 0L
+        val mpd = a["mpd"] as? String
+        val source = if (mode == "video" && mpd != null) {
+            val manifest = DashManifestParser().parse(Uri.parse("setube://manifest/$videoId"), ByteArrayInputStream(mpd.toByteArray()))
+            DashMediaSource.Factory(factory()).createMediaSource(manifest, item)
+        } else {
+            mode = "audio"
+            ProgressiveMediaSource.Factory(factory()).createMediaSource(item)
+        }
+        p.setMediaSource(source, pos)
+        p.prepare()
+        p.playWhenReady = a["autoplay"] != false
+        emitState()
+    }
+
+    fun play() = exo?.play()
+    fun pause() = exo?.pause()
+    fun seek(ms: Long) = exo?.seekTo(ms)
+    fun setVolume(v: Float) {
+        exo?.volume = v
+    }
+
+    fun stop() {
+        exo?.stop()
+        exo?.clearMediaItems()
+        key = null
+        emitState()
+    }
+
+    fun setNeighbors(prev: Boolean, next: Boolean) = session?.setNeighbors(prev, next)
+
+    /** El registro de texturas cambió (motor de Flutter nuevo): la textura vieja ya no vale. */
+    fun setTextures(t: TextureRegistry?) {
+        if (textures !== t) detachVideo()
+        textures = t
+    }
+
+    fun attachVideo(ctx: Context): Long {
+        val p = player(ctx)
+        val reg = textures ?: throw IllegalStateException("sin registro de texturas")
+        val prod = producer ?: reg.createSurfaceProducer().also { pr ->
+            pr.setCallback(object : TextureRegistry.SurfaceProducer.Callback {
+                override fun onSurfaceAvailable() {
+                    exo?.setVideoSurface(pr.surface)
+                }
+
+                override fun onSurfaceCleanup() {
+                    exo?.clearVideoSurface()
+                }
+            })
+            producer = pr
+        }
+        val vs = p.videoSize
+        if (vs.width > 0 && vs.height > 0) prod.setSize(vs.width, vs.height) else prod.setSize(1280, 720)
+        p.setVideoSurface(prod.surface)
+        return prod.id()
+    }
+
+    fun detachVideo() {
+        exo?.clearVideoSurface()
+        producer?.release()
+        producer = null
+    }
+
+    fun emitState() {
+        val p = exo ?: return
+        val state = when (p.playbackState) {
+            Player.STATE_IDLE -> "idle"
+            Player.STATE_BUFFERING -> "buffering"
+            Player.STATE_READY -> if (p.isPlaying) "playing" else "paused"
+            Player.STATE_ENDED -> "ended"
+            else -> "idle"
+        }
+        val vs = p.videoSize
+        sink?.success(
+            mapOf(
+                "type" to "state", "key" to key, "mode" to mode, "state" to state, "playWhenReady" to p.playWhenReady,
+                "positionMs" to p.currentPosition, "durationMs" to (if (p.duration == C.TIME_UNSET) 0L else p.duration),
+                "bufferedMs" to p.bufferedPosition, "width" to vs.width, "height" to vs.height,
+            ),
+        )
+    }
+
+    private fun tick() {
+        if (ticking) return
+        ticking = true
+        main.post(object : Runnable {
+            override fun run() {
+                val p = exo
+                if (p == null || !p.isPlaying) {
+                    ticking = false
+                    return
+                }
+                emitState()
+                main.postDelayed(this, 250)
+            }
+        })
+    }
+
+    fun command(cmd: String) = main.post { sink?.success(mapOf("type" to "cmd", "cmd" to cmd)) }
+
+    fun release() {
+        controller?.release()
+        controller = null
+        detachVideo()
+        exo?.release()
+        exo = null
+        session = null
+    }
+
+    fun sessionActivity(ctx: Context): PendingIntent = PendingIntent.getActivity(
+        ctx, 7, Intent(ctx, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+}
