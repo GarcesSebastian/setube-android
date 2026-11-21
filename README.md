@@ -2,6 +2,8 @@
 
 Convertidor de YouTube a MP3, M4A, WAV y MP4 que funciona entero en el teléfono, sin servidor. Pegas links (o un mensaje de WhatsApp con links), eliges el formato y listo. Si son varios, salen en un ZIP.
 
+**[Descargar el APK](https://github.com/GarcesSebastian/setube-android/releases/latest)**
+
 Hecho por [Sebxstt](https://github.com/GarcesSebastian).
 
 <table>
@@ -31,7 +33,11 @@ Hecho por [Sebxstt](https://github.com/GarcesSebastian).
 
 ## Instalar
 
-Requisitos: Flutter 3.50 (Dart 3.14), JDK 21 y Android SDK 36. Android 10 o superior en el teléfono.
+Descarga el APK de la [última versión](https://github.com/GarcesSebastian/setube-android/releases/latest) desde el teléfono y ábrelo (Android pedirá permitir instalar apps de esa fuente). Casi todos los teléfonos usan `arm64-v8a`; `armeabi-v7a` es para teléfonos viejos de 32 bits. Requiere Android 10 o superior.
+
+### Compilar
+
+Requisitos: Flutter 3.50 (Dart 3.14), JDK 21 y Android SDK 36.
 
 ```bash
 flutter pub get
