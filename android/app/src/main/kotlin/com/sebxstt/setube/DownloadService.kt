@@ -657,3 +657,79 @@ class DownloadService : Service() {
         }
     }
 }
+
+object Notifications {
+    const val PROGRESS_ID = 4100
+    const val PC_ID = 4101
+    const val CH_PROGRESS = "downloads"
+    const val CH_DONE = "downloads_done"
+    private val nextId = AtomicInteger(4200)
+
+    fun channels(ctx: Context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        val nm = ctx.getSystemService(android.app.NotificationManager::class.java)
+        nm.createNotificationChannel(android.app.NotificationChannel(CH_PROGRESS, "Descargas en curso", android.app.NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(android.app.NotificationChannel(CH_DONE, "Descargas terminadas", android.app.NotificationManager.IMPORTANCE_DEFAULT))
+    }
+
+    private fun openApp(ctx: Context, route: String?): PendingIntent {
+        val i = Intent(ctx, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            if (route != null) putExtra("route", route)
+        }
+        return PendingIntent.getActivity(ctx, route.hashCode(), i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+    }
+
+    fun progress(ctx: Context, o: Triple<Int, Int, Double>): Notification {
+        val (finished, total, pct) = o
+        return NotificationCompat.Builder(ctx, CH_PROGRESS)
+            .setSmallIcon(R.drawable.ic_stat_setube)
+            .setContentTitle(if (total == 0) "Preparando descargas" else "Descargando $finished de $total")
+            .setContentText("${pct.toInt()} %")
+            .setProgress(100, pct.toInt(), total == 0)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setContentIntent(openApp(ctx, null))
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
+            .build()
+    }
+
+    fun done(ctx: Context, s: Saver.Saved, count: Int) {
+        val view = Intent(Intent.ACTION_VIEW).setDataAndType(s.uri, s.mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        val share = Intent.createChooser(
+            Intent(Intent.ACTION_SEND).setType(s.mime).putExtra(Intent.EXTRA_STREAM, s.uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+            "Compartir",
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val id = nextId.incrementAndGet()
+        val n = NotificationCompat.Builder(ctx, CH_DONE)
+            .setSmallIcon(R.drawable.ic_stat_setube)
+            .setContentTitle(if (count > 1) "Listo: ZIP con $count archivos" else "Listo")
+            .setContentText(s.name)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx, "history"))
+            .addAction(0, "Abrir", PendingIntent.getActivity(ctx, id, view, PendingIntent.FLAG_IMMUTABLE))
+            .addAction(0, "Compartir", PendingIntent.getActivity(ctx, id + 1, share, PendingIntent.FLAG_IMMUTABLE))
+            .build()
+        notify(ctx, id, n)
+    }
+
+    fun failed(ctx: Context, count: Int) {
+        val n = NotificationCompat.Builder(ctx, CH_DONE)
+            .setSmallIcon(R.drawable.ic_stat_setube)
+            .setContentTitle("No se pudo convertir")
+            .setContentText(if (count > 1) "Ninguno de los $count videos terminó. Abre Setube para ver por qué." else "Abre Setube para ver por qué.")
+            .setAutoCancel(true)
+            .setContentIntent(openApp(ctx, null))
+            .build()
+        notify(ctx, nextId.incrementAndGet(), n)
+    }
+
+    fun notifyPublic(ctx: Context, n: Notification) = notify(ctx, nextId.incrementAndGet(), n)
+
+    private fun notify(ctx: Context, id: Int, n: Notification) {
+        try {
+            NotificationManagerCompat.from(ctx).notify(id, n)
+        } catch (_: SecurityException) {
+        }
+    }
+}
