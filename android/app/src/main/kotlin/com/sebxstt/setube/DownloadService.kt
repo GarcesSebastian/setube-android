@@ -591,3 +591,69 @@ object Downloads {
         }
     }
 }
+
+class DownloadService : Service() {
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
+
+    private var lastStartId = 0
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
+        val n = Notifications.progress(this, Downloads.overall())
+        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC else 0
+        ServiceCompat.startForeground(this, Notifications.PROGRESS_ID, n, type)
+        if (!Downloads.running()) stopSelfSafely()
+        return START_NOT_STICKY
+    }
+
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        // Android 15 limita dataSync a 6 h al día: se cancela lo que quede
+        for (j in Downloads.jobs.values) if (j.status == "active") Downloads.cancelJob(j.id)
+        stopSelfSafely()
+    }
+
+    private fun stopSelfSafely() {
+        // Con el último startId: si llegó otro start mientras tanto, el servicio sigue vivo
+        if (stopSelfResult(lastStartId)) ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+    }
+
+    override fun onDestroy() {
+        instance = null
+        super.onDestroy()
+    }
+
+    companion object {
+        @Volatile private var instance: DownloadService? = null
+        private var lastUpdate = 0L
+        private val main = Handler(Looper.getMainLooper())
+
+        fun start(ctx: Context) {
+            main.post {
+                val i = Intent(ctx, DownloadService::class.java)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i) else ctx.startService(i)
+            }
+        }
+
+        fun update() {
+            main.post {
+                val s = instance ?: return@post
+                if (!Downloads.running()) {
+                    s.stopSelfSafely()
+                    return@post
+                }
+                val now = System.currentTimeMillis()
+                if (now - lastUpdate < 1000) return@post
+                lastUpdate = now
+                try {
+                    NotificationManagerCompat.from(s).notify(Notifications.PROGRESS_ID, Notifications.progress(s, Downloads.overall()))
+                } catch (_: SecurityException) {
+                }
+            }
+        }
+    }
+}
