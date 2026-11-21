@@ -173,3 +173,127 @@ class Meta {
         fetchedAt: DateTime.tryParse(_str(j['fetchedAt'])) ?? DateTime.fromMillisecondsSinceEpoch(0),
       );
 }
+
+const _liveStatuses = {'is_live', 'is_upcoming', 'post_live'};
+
+String? clipDescription(Object? s) {
+  if (s is! String) return null;
+  final t = s.trim();
+  if (t.isEmpty) return null;
+  final cps = t.runes.toList();
+  return cps.length > 200 ? '${String.fromCharCodes(cps.take(200))}…' : t;
+}
+
+List<Json> _formatsOf(Json info) =>
+    [for (final f in (info['formats'] as List? ?? const [])) if (f is Map) f.cast<String, dynamic>()];
+
+Meta deriveMeta(String videoId, Json info, {DateTime? now}) {
+  String? s(Object? v) => v is String && v.isNotEmpty ? v : null;
+  final raw = _formatsOf(info)
+      .where((f) => _str(f['format_id']).isNotEmpty && _str(f['format_note']) != 'storyboard' && _str(f['ext']) != 'mhtml')
+      .toList();
+  final audioAll = raw.where((f) => _isAudioOnly(f) && _isStereo(f)).toList();
+  final audioHttps = audioAll.where(_isHttps).toList();
+  final opus = _best(audioHttps.where((f) => _str(f['acodec']).startsWith('opus')), _audioScore);
+  final m4a = _best(audioHttps.where((f) => _str(f['ext']) == 'm4a' && _str(f['acodec']).startsWith('mp4a')), _audioScore);
+  AudioFmt toAudio(Json f) => AudioFmt(_str(f['format_id']), _num(f['abr']), _bytesOf(f), acodec: _str(f['acodec']));
+  AudioFmt? hls;
+  if (audioHttps.isEmpty) {
+    final h = _best(audioAll.where((f) => _str(f['protocol']) == 'm3u8_native'), _rate);
+    if (h != null) hls = AudioFmt(_str(h['format_id']), _num(h['abr']), null, acodec: _str(h['acodec']));
+  }
+
+  final avc1All = raw
+      .where((f) =>
+          _str(f['vcodec']).startsWith('avc1') && _str(f['acodec']) == 'none' && _str(f['ext']) == 'mp4' && (_num(f['height']) ?? 0) > 0)
+      .toList();
+  final byHeight = <int, Json>{};
+  for (final f in avc1All.where((f) => _isHttps(f) && (_num(f['height']) ?? 0) <= 1080)) {
+    final h = _num(f['height'])!.round();
+    final prev = byHeight[h];
+    if (prev == null || (_num(f['tbr']) ?? 0) > (_num(prev['tbr']) ?? 0)) byHeight[h] = f;
+  }
+  final heights = byHeight.keys.toList()..sort();
+  final video = [for (final h in heights) VideoFmt(h, _str(byHeight[h]!['format_id']), _num(byHeight[h]!['fps']), _bytesOf(byHeight[h]!))];
+
+  final gaps = <String>{};
+  if ((audioHttps.isEmpty && audioAll.isNotEmpty) || (video.isEmpty && avc1All.any((f) => !_isHttps(f)))) gaps.add('only_fragmented');
+  if (avc1All.isEmpty) gaps.add('no_avc1');
+  if (m4a == null) gaps.add('no_m4a');
+
+  final dur = info['duration'];
+  return Meta(
+    videoId: videoId,
+    title: s(info['title']),
+    author: s(info['channel']) ?? s(info['uploader']),
+    duration: dur is num && dur.isFinite ? dur.round() : 0,
+    live: info['live_status'] is String && _liveStatuses.contains(info['live_status']),
+    description: clipDescription(info['description']),
+    ageLimit: info['age_limit'] is num ? (info['age_limit'] as num).round() : 0,
+    opus: opus == null ? null : toAudio(opus),
+    m4a: m4a == null ? null : toAudio(m4a),
+    hls: hls,
+    video: video,
+    gaps: gaps,
+    fetchedAt: now ?? DateTime.now(),
+  );
+}
+
+/// Qué pedirle a yt-dlp para una salida concreta.
+class Selection {
+  const Selection({required this.formatSel, required this.transcode, this.height, this.bytes, this.hls = false});
+  final String formatSel;
+  final bool transcode;
+  final int? height;
+  final int? bytes;
+  final bool hls;
+}
+
+/// `null` si el video no tiene una versión válida para esa salida.
+Selection? selectFormats(Meta meta, OutFormat format, int? quality) {
+  if (format == OutFormat.mp4) {
+    final a = meta.audioForVideo;
+    if (meta.video.isEmpty || a == null) return null;
+    final target = quality == null || quality == bestQuality ? 1080 : quality;
+    final below = meta.video.where((v) => v.height <= target).toList();
+    final v = below.isNotEmpty ? below.last : meta.video.first;
+    final bytes = v.bytes != null && a.bytes != null ? v.bytes! + a.bytes! : null;
+    return Selection(formatSel: '${v.formatId}+${a.formatId}', transcode: false, height: v.height, bytes: bytes);
+  }
+  if (format == OutFormat.m4a) {
+    final src = meta.m4a ?? meta.opus;
+    if (src != null) return Selection(formatSel: src.formatId, transcode: meta.m4a == null, bytes: src.bytes);
+  } else {
+    final src = _best([meta.opus, meta.m4a].whereType<AudioFmt>(), (a) => a.abr ?? 0);
+    if (src != null) return Selection(formatSel: src.formatId, transcode: false, bytes: src.bytes);
+  }
+  final h = meta.hls;
+  if (h != null) {
+    return Selection(formatSel: h.formatId, transcode: format == OutFormat.m4a && !h.acodec.startsWith('mp4a'), hls: true);
+  }
+  return null;
+}
+
+/// Selector genérico para cuando no hay metadata: yt-dlp elige.
+String genericSelector(OutFormat format, int? quality) {
+  switch (format) {
+    case OutFormat.mp4:
+      final h = quality == null || quality == bestQuality ? 1080 : quality;
+      return 'bv*[vcodec^=avc1][ext=mp4][height<=$h]+ba[ext=m4a]/bv*[height<=$h]+ba/b[height<=$h]/bv*+ba/b';
+    case OutFormat.m4a:
+      return 'ba[ext=m4a]/ba/b';
+    default:
+      return 'ba/b';
+  }
+}
+
+/// Tamaño estimado del archivo final.
+int? estimateBytes(Meta meta, OutFormat format, int? quality) {
+  final d = meta.duration;
+  if (format == OutFormat.mp3) return ((quality ?? 192) * 1000 / 8 * d).round();
+  if (format == OutFormat.wav) return 44100 * 2 * 2 * d + 44;
+  final s = selectFormats(meta, format, quality);
+  if (s == null) return null;
+  if (s.transcode) return (192 * 1000 / 8 * d).round();
+  return s.bytes;
+}
