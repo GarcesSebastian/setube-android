@@ -194,3 +194,202 @@ class _CommandBarState extends State<CommandBar> {
     );
   }
 }
+
+String formatHint(OutFormat f) => switch (f) {
+      OutFormat.mp3 => 'MP3 suena en cualquier sitio. Recodifica el audio a la calidad elegida.',
+      OutFormat.m4a => 'M4A copia el audio AAC original, sin perder calidad.',
+      OutFormat.wav => 'WAV sin compresión, 16 bits a 44,1 kHz. Ocupa mucho más.',
+      OutFormat.mp4 => 'MP4 une el video y el audio originales sin recodificar.',
+    };
+
+class OutputBar extends StatelessWidget {
+  const OutputBar({super.key, required this.queue});
+  final QueueModel queue;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    final f = queue.format;
+    final t = queue.totals;
+    final formats = f.isVideo ? const [OutFormat.mp4] : const [OutFormat.mp3, OutFormat.m4a, OutFormat.wav];
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          Segmented<bool>(
+            value: f.isVideo,
+            options: const [(false, 'Audio', LucideIcons.headphones), (true, 'Video', LucideIcons.film)],
+            onChanged: queue.busy ? null : queue.setKind,
+          ),
+          for (final x in formats)
+            ChoiceChipX(label: x.label, selected: x == f, onTap: queue.busy ? null : () => queue.setFormat(x)),
+          _QualityButton(queue: queue),
+        ]),
+        const SizedBox(height: 10),
+        Text(formatHint(f), style: body(13, color: p.inkMuted)),
+        if (t.count > 0) ...[
+          const SizedBox(height: 8),
+          Wrap(spacing: 6, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
+            StatPill('${t.count} ${t.count == 1 ? 'video' : 'videos'}'),
+            if (t.duration > 0) StatPill(formatDuration(t.duration)),
+            if (t.known > 0) StatPill('${t.known < t.count ? '≥ ' : '~'}${formatBytes(t.bytes)}'),
+            if (t.count > 1) Text('Se guardan en un ZIP', style: body(13, color: p.inkMuted)),
+          ]),
+        ],
+      ]),
+    );
+  }
+}
+
+class _QualityButton extends StatelessWidget {
+  const _QualityButton({required this.queue});
+  final QueueModel queue;
+
+  List<int?> get _options => switch (queue.format) {
+        OutFormat.mp3 => mp3Qualities,
+        OutFormat.mp4 => mp4Qualities,
+        _ => const [null],
+      };
+
+  /// Con un solo video en la cola se deshabilitan las calidades que no tiene.
+  bool _available(int? q) {
+    if (queue.format != OutFormat.mp4 || q == null || q == bestQuality) return true;
+    final convertible = queue.items.where((i) => i.convertible).toList();
+    if (convertible.length != 1) return true;
+    final m = convertible.first.meta;
+    if (m == null || m.video.isEmpty) return true;
+    return m.video.any((v) => v.height >= q);
+  }
+
+  int? _size(int? q) {
+    final convertible = queue.items.where((i) => i.convertible && i.meta != null).toList();
+    if (convertible.isEmpty) return null;
+    var sum = 0;
+    for (final i in convertible) {
+      final b = estimateBytes(i.meta!, queue.format, q);
+      if (b == null) return null;
+      sum += b;
+    }
+    return sum;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    final f = queue.format;
+    final fixed = f == OutFormat.m4a || f == OutFormat.wav;
+    final label = qualityLabel(f, queue.quality);
+    return Material(
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(radiusControl), side: BorderSide(color: p.line)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: fixed || queue.busy ? null : () => _pick(context),
+        child: Container(
+          height: 36,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Text(label, style: mono(13.5, weight: FontWeight.w600, color: p.ink)),
+            if (!fixed) ...[const SizedBox(width: 6), Icon(LucideIcons.chevronDown, size: 16, color: p.inkMuted)],
+          ]),
+        ),
+      ),
+    );
+  }
+
+  void _pick(BuildContext context) {
+    final p = context.pal;
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+            child: Text('Calidad ${queue.format.label}', style: display(18, color: p.ink)),
+          ),
+          for (final q in _options)
+            ListTile(
+              enabled: _available(q),
+              onTap: () {
+                queue.setQuality(q);
+                Navigator.pop(ctx);
+              },
+              leading: Icon(
+                q == queue.quality ? LucideIcons.circleCheck : LucideIcons.circle,
+                color: q == queue.quality ? p.red : p.edge,
+                size: 20,
+              ),
+              title: Text(qualityLabel(queue.format, q), style: mono(15, weight: FontWeight.w600, color: p.ink)),
+              trailing: Text(
+                !_available(q) ? 'No disponible' : (_size(q) == null ? '' : '~${formatBytes(_size(q))}'),
+                style: mono(13, color: p.inkMuted),
+              ),
+            ),
+          const SizedBox(height: 8),
+        ]),
+      ),
+    );
+  }
+}
+
+/// Mensaje de error para la búsqueda.
+String searchErrorText(ErrCode c) =>
+    c == ErrCode.upstreamBlocked ? messageFor(c) : 'No se pudo buscar en YouTube. ${messageFor(c)}';
+
+class RecentSearches extends StatelessWidget {
+  const RecentSearches({super.key, required this.settings, required this.onPick, required this.queue});
+  final Settings settings;
+  final QueueModel queue;
+  final ValueChanged<String> onPick;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.pal;
+    final list = settings.recentSearches;
+    if (list.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          Text('Búsquedas recientes', style: body(13, color: p.inkMuted)),
+          const Spacer(),
+          TextButton(
+            onPressed: () {
+              final old = [...list];
+              settings.clearSearches();
+              queue.toast('Historial de búsqueda borrado', action: 'Deshacer', onAction: () => settings.restoreSearches(old));
+            },
+            child: Text('Borrar historial', style: body(13, weight: FontWeight.w600, color: p.inkMuted)),
+          ),
+        ]),
+        Wrap(spacing: 6, runSpacing: 6, children: [
+          for (final q in list)
+            Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(radiusControl),
+                border: Border.all(color: p.line),
+                color: p.panel,
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                InkWell(
+                  onTap: () => onPick(q),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 220),
+                      child: Text(q, overflow: TextOverflow.ellipsis, style: body(14, color: p.ink)),
+                    ),
+                  ),
+                ),
+                InkWell(
+                  onTap: () => settings.removeSearch(q),
+                  child: Padding(padding: const EdgeInsets.all(8), child: Icon(LucideIcons.x, size: 14, color: p.inkMuted)),
+                ),
+              ]),
+            ),
+        ]),
+      ]),
+    );
+  }
+}
